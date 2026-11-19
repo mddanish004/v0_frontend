@@ -3,7 +3,15 @@ import { apiCall } from '@/store/utils';
 import { endpoints } from '@/store/urls';
 import stl from './RefereeMatchTable.module.scss';
 import toast from 'react-hot-toast';
-import { Dialog, DialogActions, DialogContent, DialogTitle, Button, TextField } from '@mui/material';
+import { Dialog, DialogActions, DialogContent, DialogTitle, Button, TextField, MenuItem } from '@mui/material';
+import OutcomeBadge from '@/components/common/OutcomeBadge';
+import {
+  DECLARABLE_OUTCOMES, declarableOutcomeTypes, formatResult, getOutcomeDisplay, hasScores
+} from '@/utils/matchOutcome';
+
+// A declared outcome needs both teams decided (knockout slots start as "TBD")
+const hasBothTeams = (match) =>
+  [match.team1?.team_id, match.team2?.team_id].every(id => id && id !== 'TBD');
 
 const RefereeMatchTable = ({ tournamentId }) => {
   const [matches, setMatches] = useState([]);
@@ -12,7 +20,9 @@ const RefereeMatchTable = ({ tournamentId }) => {
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [selectedMatch, setSelectedMatch] = useState(null);
   const [scores, setScores] = useState({ team1Score: 0, team2Score: 0 });
-  const [modalType, setModalType] = useState('start'); // 'start' or 'completed'
+  const [modalType, setModalType] = useState('start'); // 'start', 'completed' or 'declaration'
+  const [declaration, setDeclaration] = useState({ type: null, winnerTeamId: '', reason: '' });
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     const fetchMatches = async () => {
@@ -143,6 +153,55 @@ const RefereeMatchTable = ({ tournamentId }) => {
     setShowStatusModal(true);
   };
 
+  const handleDeclareClick = (match, type) => {
+    setSelectedMatch(match);
+    setDeclaration({ type, winnerTeamId: '', reason: '' });
+    setModalType('declaration');
+    setShowStatusModal(true);
+  };
+
+  const handleDeclareOutcome = async () => {
+    const type = declaration.type;
+    const label = getOutcomeDisplay({ type })?.label || type;
+    try {
+      setSubmitting(true);
+      const response = await apiCall(`${endpoints.declareOutcome}/${selectedMatch.match_id}`, {
+        method: "POST",
+        body: {
+          tournament_id: tournamentId,
+          outcome: type,
+          winner_team_id: declaration.winnerTeamId,
+          reason: declaration.reason || null
+        }
+      });
+
+      // Update local state from the server's view of the match
+      const updated = response.match;
+      setMatches(matches.map(m =>
+        m.match_id === updated.id
+          ? {
+              ...m,
+              match_status: {
+                ...m.match_status,
+                status: updated.status,
+                is_final: updated.is_final,
+                winner_team_id: updated.winner_team_id
+              },
+              outcome: updated.outcome
+            }
+          : m
+      ));
+
+      setShowStatusModal(false);
+      toast.success(response.message || `${label} declared`);
+    } catch (error) {
+      console.error(`Failed to declare ${label}:`, error);
+      toast.error(error.message || `Failed to declare ${label}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   if (loading) {
     return <div className={stl.loading}>Loading matches...</div>;
   }
@@ -189,22 +248,34 @@ const RefereeMatchTable = ({ tournamentId }) => {
                       />
                     </div>
                   ) : (
-                    match.match_result
+                    formatResult(match)
                   )}
                 </td>
                 <td>
                   <span className={`${stl.status} ${stl[match.match_status.status]}`}>
                     {match.match_status.status}
                   </span>
+                  {' '}<OutcomeBadge outcome={match.outcome} />
                 </td>
                 <td>
                   {match.match_status.status === 'pending' && (
-                    <button 
-                      onClick={() => handleStartMatchClick(match)}
-                      className={stl.startButton}
-                    >
-                      Start Match
-                    </button>
+                    <div className={stl.actionButtons}>
+                      <button 
+                        onClick={() => handleStartMatchClick(match)}
+                        className={stl.startButton}
+                      >
+                        Start Match
+                      </button>
+                      {hasBothTeams(match) && declarableOutcomeTypes().map((type) => (
+                        <button
+                          key={type}
+                          onClick={() => handleDeclareClick(match, type)}
+                          className={stl.outcomeButton}
+                        >
+                          {getOutcomeDisplay({ type })?.label || type}
+                        </button>
+                      ))}
+                    </div>
                   )}
                   {match.match_status.status === 'on-going' && (
                     editingMatch?.match_id === match.match_id ? (
@@ -237,7 +308,7 @@ const RefereeMatchTable = ({ tournamentId }) => {
                       </button>
                     )
                   )}
-                  {match.match_status.status === 'completed' && (
+                  {match.match_status.status === 'completed' && hasScores(match.outcome) && (
                     <button 
                       onClick={() => handleEditClick(match)}
                       className={stl.editButton}
@@ -257,11 +328,43 @@ const RefereeMatchTable = ({ tournamentId }) => {
         onClose={() => setShowStatusModal(false)}
       >
         <DialogTitle>
-          {modalType === 'start' ? 'Start Match' : 'Match Completed'}
+          {modalType === 'start'
+            ? 'Start Match'
+            : modalType === 'declaration'
+              ? `Declare ${getOutcomeDisplay({ type: declaration.type })?.label || declaration.type}`
+              : 'Match Completed'}
         </DialogTitle>
         <DialogContent>
           {modalType === 'start' ? (
             <p>Are you sure you want to start this match?</p>
+          ) : modalType === 'declaration' ? (
+            <div className={stl.declarationForm}>
+              <p>{DECLARABLE_OUTCOMES[declaration.type]?.help}</p>
+              <TextField
+                select
+                size="small"
+                label="Winner"
+                value={declaration.winnerTeamId}
+                onChange={(e) => setDeclaration({ ...declaration, winnerTeamId: e.target.value })}
+              >
+                {selectedMatch && [
+                  { id: selectedMatch.team1?.team_id, players: selectedMatch.team1_players },
+                  { id: selectedMatch.team2?.team_id, players: selectedMatch.team2_players }
+                ].map(team => (
+                  <MenuItem key={team.id} value={team.id}>
+                    {team.id} - {team.players}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                size="small"
+                label="Reason (optional)"
+                placeholder="e.g. Opponent did not show up"
+                value={declaration.reason}
+                inputProps={{ maxLength: 255 }}
+                onChange={(e) => setDeclaration({ ...declaration, reason: e.target.value })}
+              />
+            </div>
           ) : (
             <p>This match has been completed. Would you like to override the scores?</p>
           )}
@@ -273,7 +376,15 @@ const RefereeMatchTable = ({ tournamentId }) => {
           >
             Cancel
           </Button>
-          {modalType === 'start' ? (
+          {modalType === 'declaration' ? (
+            <Button
+              onClick={handleDeclareOutcome}
+              disabled={!declaration.winnerTeamId || submitting}
+              style={{ color: declaration.winnerTeamId && !submitting ? '#4CAF50' : undefined }}
+            >
+              Declare {getOutcomeDisplay({ type: declaration.type })?.label || declaration.type}
+            </Button>
+          ) : modalType === 'start' ? (
             <Button 
               onClick={() => {
                 handleStartMatch(selectedMatch);

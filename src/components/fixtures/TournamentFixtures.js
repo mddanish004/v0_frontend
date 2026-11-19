@@ -7,6 +7,8 @@ import KnockoutBracket2 from './KnockoutBracket2';
 import { endpoints } from '@/store/urls';
 import { apiCall } from '@/store/utils';
 import toast from 'react-hot-toast';
+import OutcomeBadge from '@/components/common/OutcomeBadge';
+import { hasScores } from '@/utils/matchOutcome';
 
 const TournamentFixtures = ({ tournamentId, totalRounds }) => {
     const router = useRouter();
@@ -121,22 +123,26 @@ const TournamentFixtures = ({ tournamentId, totalRounds }) => {
                 <div className={styles.teams}>
                     <div className={`${styles.team} ${
                         match.team1_checked_in === true ? styles.checkedIn : ''
-                    }`}>
+                    } ${!hasScores(match.outcome) && match.winner_team_id === match.team1_id ? styles.winner : ''}`}>
                         <div className={styles.teamPlayers}>{match.team1_players}</div>
                         {match.team1_id && (
                             <div className={styles.teamId}>Team ID: {match.team1_id}</div>
                         )}
-                        <div className={styles.score}>{match.team1Score}</div>
+                        {hasScores(match.outcome) && (
+                            <div className={styles.score}>{match.team1Score}</div>
+                        )}
                     </div>
                     <div className={styles.vs}>vs</div>
                     <div className={`${styles.team} ${
                         match.team2_checked_in === true ? styles.checkedIn : ''
-                    }`}>
+                    } ${!hasScores(match.outcome) && match.winner_team_id === match.team2_id ? styles.winner : ''}`}>
                         <div className={styles.teamPlayers}>{match.team2_players}</div>
                         {match.team2_id && (
                             <div className={styles.teamId}>Team ID: {match.team2_id}</div>
                         )}
-                        <div className={styles.score}>{match.team2Score}</div>
+                        {hasScores(match.outcome) && (
+                            <div className={styles.score}>{match.team2Score}</div>
+                        )}
                     </div>
                 </div>
 
@@ -146,6 +152,7 @@ const TournamentFixtures = ({ tournamentId, totalRounds }) => {
                     <span className={`${styles.status} ${styles[match.status]}`}>
                         {match.status.charAt(0).toUpperCase() + match.status.slice(1)}
                     </span>
+                    <OutcomeBadge outcome={match.outcome} />
                 </div>
             </div>
         ));

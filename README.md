@@ -1,36 +1,115 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## How the current scoring mechanism works
 
-## Getting Started
+A match stores one aggregate integer per team in the `score` table, one row for
+each team, rather than per-game or per-set scores. Score rows are normally
+created with the match at `0-0`; `0-0` is how v0 represents an unplayed match.
 
-First, run the development server:
+Scores are submitted through `POST /update-score` with:
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```json
+{ "match_id": 11, "tournament_id": 1, "score": "11-7", "final": true }
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The endpoint parses the `"a-b"` string, updates or creates both score rows, and
+when `final` is true it sets `is_final`, asks the match's outcome handler for
+the winner (the higher score for `REGULAR`, empty for a tie), and writes the
+winner into the successor bracket match if one exists. It does not change
+`status`; status is changed separately through
+`POST /update-match-status/<match_id>`.
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+Standings treat a regular match as played when it is not `0-0`: they add the two
+scores to `points_scored` / `points_lost`, count a win for the higher score, and
+award 2 ranking points per win in pool and overall standings. For a walkover the
+handler counts the declared winner with no points scored. Knockout seeding uses
+the same pool standings. The separate round-standings endpoint uses 1 point per
+win, which is a pre-existing inconsistency.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## What changes I made and why
 
-## Learn More
+- Added `outcomes.py` as the only place that knows how a match was decided. It
+  defines a `MatchOutcome` enum (`REGULAR`, `WALKOVER`), an `OutcomeHandler` base
+  class, concrete handlers, and an `OUTCOME_HANDLERS` registry. Each handler
+  owns whether scores apply, whether the status may change, whether the match
+  counts in standings and rating exports, how it tallies, how it is applied,
+  and its display label. Unknown or non-declarable outcome names are rejected
+  centrally.
+- Added `POST /declare-outcome/<match_id>` for any registered declarable
+  outcome, plus a `/declare-walkover/<match_id>` shortcut for compatibility.
+  Both use the same handler-driven flow: validate the winner and state through
+  the handler, lock the match row, apply the outcome and bracket advancement in
+  one transaction, and return a clear error for invalid transitions.
+- Blocked `/update-score` and status changes for outcomes whose handler says
+  scores or status changes do not apply. The scored-match winner rule itself is
+  now `OutcomeHandler.winner_from_scores`, used by the score route and the
+  standings tally instead of being duplicated.
+- Changed standings, second-place standings, knockout seeding, round
+  completion, cumulative points, court matches, fixtures, fixture CSV and the
+  DUPR export to ask the outcome handler instead of comparing scores or outcome
+  strings directly.
+- Added a frontend outcome lookup map, a reusable `OutcomeBadge`, and a generic
+  declaration dialog in the existing referee flow. Declarable outcomes are
+  listed in the same map, so adding a new outcome adds a button and dialog
+  without new component logic. Their cards hide the `0-0` scoreline, show the
+  badge, and highlight the winner.
 
-To learn more about Next.js, take a look at the following resources:
+The reason for this shape is separation of concerns. `status` remains the
+lifecycle, `score` remains what was played, and `outcome_type` says how the
+result was reached. Adding Forfeit or Bye means adding an enum member, a
+handler, and a display/declaration entry in the frontend map. No backend route,
+standings or bracket code changes are needed. Regular matches keep their
+existing behaviour, and legacy rows with
+no outcome value are read as `REGULAR`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Schema and migration changes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Two columns were added to the `match` table:
 
-## Deploy on Vercel
+```sql
+ALTER TABLE `match`
+ADD COLUMN `outcome_type` VARCHAR(20) NOT NULL DEFAULT 'REGULAR',
+ADD COLUMN `outcome_reason` VARCHAR(255) NULL;
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`outcome_type` is `NOT NULL` with a default, so existing rows become `REGULAR`
+without a data backfill. `outcome_reason` is optional and used for walkover
+reasons.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Files:
+
+- `migrations/bul/add_match_outcome.sql`
+- `migrations/bul/add_match_outcome_down.sql`
+
+Apply the up script to any existing database before running this version:
+
+```bash
+mysql -u <user> -p <database> < migrations/bul/add_match_outcome.sql
+```
+
+The down script drops both columns and therefore loses outcome data. The
+original SQL dump was not modified. New databases created by `db.create_all()`
+get the columns from the model, but `create_all()` does not alter existing
+tables, so deployed databases need the migration.
+
+## Assumptions
+
+- A walkover means one side did not play at all. It is not a mid-match
+  retirement or a forfeit with a partial score.
+- A walkover can only be declared while the match is `pending`, both teams are
+  known, and no non-zero score has been recorded.
+- A walkover records `0-0` internally, configured once as
+  `WalkoverOutcome.AWARDED_SCORE`. The frontend hides that scoreline.
+- A walkover counts as a played match and a win, scores no points, and is
+  excluded from the DUPR rating export.
+- A walkover winner advances in a knockout exactly like a regular winner.
+- Repeating the same declaration is idempotent. Declaring a different winner,
+  or changing a regular result into a walkover, is rejected.
+- Unknown or blank `outcome_type` values are treated as `REGULAR` for backward
+  compatibility.
+- The reason is limited to 255 characters.
+- No new dependencies were introduced.
+
+## What I would improve with more time
+
+- Add a real migration tool such as Alembic instead of hand-run SQL files.
+
+
